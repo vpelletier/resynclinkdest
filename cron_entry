@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /usr/local/sbin/backup_nas.sh /root /home/*
