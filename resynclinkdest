@@ -24,16 +24,15 @@ HASH_CHUNK_SIZE = 1024 * 1024
 class FileCompare(object):
     __slots__ = ('path', 'device', 'inode', 'link_count', 'stat', '_xattr', '_hash')
 
-    def __init__(self, path):
+    def __init__(self, path, stat):
         self.path = path
-        real_stat = os.lstat(path)
-        self.device = real_stat.st_dev
-        self.inode = real_stat.st_ino
-        self.link_count = real_stat.st_nlink
+        self.device = stat.st_dev
+        self.inode = stat.st_ino
+        self.link_count = stat.st_nlink
         self.stat = (
-            real_stat.st_size,
-            real_stat.st_mtime,
-            real_stat.st_mode,
+            stat.st_size,
+            stat.st_mtime,
+            stat.st_mode,
         )
         self._xattr = None
         self._hash = None
@@ -80,40 +79,59 @@ def main():
         unlink = os.unlink
         link = os.link
     else:
-        print 'Dry-run mode, only printing. See "--do". Note: dry run mode will print more actions than will actually be needed as this tool uses the filesystem as running memory.'
+        print 'Dry-run mode, only printing. See "--do".'
         unlink = link = lambda *args, **kw: None
-    for head_index, head in enumerate(args.head_list[:-1], 1):
-        other_head_list = args.head_list[head_index:]
-        file_count = 0
-        for root, _, file_name_list in os.walk(head):
-            print root
-            headless_root = os.path.relpath(root, head)
-            file_count += len(file_name_list)
+    known_headless_path_set = set()
+    for head_index, current_head in enumerate(args.head_list[:-1]):
+        head_list = args.head_list[head_index:]
+        for root, _, file_name_list in os.walk(current_head):
+            current_headless_root = os.path.relpath(root, current_head)
             for file_name in file_name_list:
-                headless_file_path = os.path.join(headless_root, file_name)
-                my_path = os.path.join(head, headless_file_path)
-                me = FileCompare(my_path)
-                need_print_me = True
-                known_dupe_inode_set = set()
-                for other_head in other_head_list:
-                    other_path = os.path.join(other_head, headless_file_path)
-                    if not os.path.lexists(other_path):
+                current_headless_file_path = os.path.join(current_headless_root, file_name)
+                if current_headless_file_path in known_headless_path_set:
+                    continue
+                inode_head_list_dict = {}
+                for head in head_list:
+                    full_path = os.path.join(head, current_headless_file_path)
+                    try:
+                        stat = os.lstat(full_path)
+                    except OSError:
                         continue
-                    other = FileCompare(other_path)
-                    assert me.device == other.device, (my_path, other_path)
-                    if me.inode != other.inode and (other.inode in known_dupe_inode_set or me == other):
-                        if need_print_me:
-                            print ' ', file_name, '<-',
-                            need_print_me = False
-                        known_dupe_inode_set.add(other.inode)
-                        print other_head,
-                        sys.stdout.flush()
-                        try:
-                            unlink(other_path)
-                        finally:
-                            link(my_path, other_path)
-                if not need_print_me:
-                    print
+                    key = stat.st_ino
+                    try:
+                        inode_head_list = inode_head_list_dict[key][1]
+                    except KeyError:
+                        inode_head_list_dict[key] = (
+                            FileCompare(full_path, stat),
+                            [head],
+                        )
+                    else:
+                        inode_head_list.append(head)
+                inode_head_list_list = inode_head_list_dict.values()
+                for inode_index, (my_file_compare, my_head_list) in enumerate(inode_head_list_list, 1):
+                    if not my_head_list:
+                        continue
+                    need_print = True
+                    my_path = my_file_compare.path
+                    for other_file_compare, other_head_list in inode_head_list_list[inode_index:]:
+                        if not other_head_list:
+                            continue
+                        if my_file_compare == other_file_compare:
+                            if need_print:
+                                print ' ', my_path, '<-',
+                                need_print = False
+                            for other_head in other_head_list:
+                                print other_head,
+                                sys.stdout.flush()
+                                other_path = os.path.join(other_head, current_headless_file_path)
+                                try:
+                                    unlink(other_path)
+                                finally:
+                                    link(my_path, other_path)
+                            del other_head_list[:]
+                    if not need_print:
+                        print
+                known_headless_path_set.add(current_headless_file_path)
 
 if __name__ == '__main__':
     main()
