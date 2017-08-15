@@ -1,0 +1,119 @@
+#!/usr/bin/env python
+"""
+hardlink-inspired file deduplication tool
+
+Compared to hardlink, this tool only compares files which have the same
+subpath inside given heads. This allows reducing memory requirements, in turn
+allowing to run on much larger file trees.
+
+As such, it is intended to be used with rsync-populated file trees:
+  rsync --link-dest="<destN>" "<source>" "<destN+1>"
+This tool can relink all <dest*> content, including linking N+2 to N even if
+N+1 is different from both.
+"""
+import argparse
+import collections
+import hashlib
+import itertools
+import os
+import sys
+import time
+from xattr import listxattr
+
+HASH_CHUNK_SIZE = 1024 * 1024
+class FileCompare(object):
+    __slots__ = ('path', 'device', 'inode', 'link_count', 'stat', '_xattr', '_hash')
+
+    def __init__(self, path):
+        self.path = path
+        real_stat = os.lstat(path)
+        self.device = real_stat.st_dev
+        self.inode = real_stat.st_ino
+        self.link_count = real_stat.st_nlink
+        self.stat = (
+            real_stat.st_size,
+            real_stat.st_mtime,
+            real_stat.st_mode,
+        )
+        self._xattr = None
+        self._hash = None
+
+
+    @property
+    def xattr(self):
+        xattr = self._xattr
+        if xattr is None:
+            self._xattr = xattr = listxattr(self.path, symlink=True)
+        return xattr
+
+    @property
+    def hash(self):
+        hash_value = self._hash
+        if hash_value is None:
+            with open(self.path) as my_file:
+                hash_list = (
+                    hashlib.sha1(),
+                    hashlib.md5(),
+                )
+                while True:
+                    chunk = my_file.read(HASH_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    for hash_obj in hash_list:
+                        hash_obj.update(chunk)
+            self._hash = hash_value = tuple([x.digest() for x in hash_list])
+        return hash_value
+
+    def __eq__(self, other):
+        return (
+            self.stat == other.stat and
+            self.xattr == other.xattr and
+            self.hash == other.hash
+        )
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('head_list', metavar='HEAD', nargs='+')
+    parser.add_argument('--do', action='store_true')
+    args = parser.parse_args()
+    if args.do:
+        unlink = os.unlink
+        link = os.link
+    else:
+        print 'Dry-run mode, only printing. See "--do". Note: dry run mode will print more actions than will actually be needed as this tool uses the filesystem as running memory.'
+        unlink = link = lambda *args, **kw: None
+    for head_index, head in enumerate(args.head_list[:-1], 1):
+        other_head_list = args.head_list[head_index:]
+        file_count = 0
+        for root, _, file_name_list in os.walk(head):
+            print root
+            headless_root = os.path.relpath(root, head)
+            file_count += len(file_name_list)
+            for file_name in file_name_list:
+                headless_file_path = os.path.join(headless_root, file_name)
+                my_path = os.path.join(head, headless_file_path)
+                me = FileCompare(my_path)
+                need_print_me = True
+                known_dupe_inode_set = set()
+                for other_head in other_head_list:
+                    other_path = os.path.join(other_head, headless_file_path)
+                    if not os.path.lexists(other_path):
+                        continue
+                    other = FileCompare(other_path)
+                    assert me.device == other.device, (my_path, other_path)
+                    if me.inode != other.inode and (other.inode in known_dupe_inode_set or me == other):
+                        if need_print_me:
+                            print ' ', file_name, '<-',
+                            need_print_me = False
+                        known_dupe_inode_set.add(other.inode)
+                        print other_head,
+                        sys.stdout.flush()
+                        try:
+                            unlink(other_path)
+                        finally:
+                            link(my_path, other_path)
+                if not need_print_me:
+                    print
+
+if __name__ == '__main__':
+    main()
