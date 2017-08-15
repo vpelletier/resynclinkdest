@@ -11,6 +11,7 @@ As such, it is intended to be used with rsync-populated file trees:
 This tool can relink all <dest*> content, including linking N+2 to N even if
 N+1 is different from both.
 """
+from __future__ import print_function
 import argparse
 import collections
 import hashlib
@@ -70,68 +71,115 @@ class FileCompare(object):
             self.hash == other.hash
         )
 
+class BlackHoleSet(object):
+    @staticmethod
+    def add(_):
+        pass
+
+    @staticmethod
+    def __contains__(_):
+        return False
+
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('head_list', metavar='HEAD', nargs='+')
-    parser.add_argument('--do', action='store_true')
+    parser = argparse.ArgumentParser(
+        'Re-hardlink identical files which reside at identical subpaths under '
+        'given HEAD directories.'
+    )
+    parser.add_argument(
+        'head_list',
+        metavar='HEAD',
+        nargs='+',
+        help='Top-level directories.',
+    )
+    parser.add_argument(
+        '--do',
+        action='store_true',
+        help='Actually do relink files. By default, actions are printed but '
+        'no file is actually modified.'
+    )
+    parser.add_argument(
+        '--constant-memory',
+        action='store_true',
+        help='Forget which paths were checked, making memory use globally '
+        'constant, trading memory for many more syscalls (slow !)',
+    )
     args = parser.parse_args()
     if args.do:
         unlink = os.unlink
         link = os.link
     else:
-        print 'Dry-run mode, only printing. See "--do".'
+        print('Dry-run mode, not touching files. See "--do".')
         unlink = link = lambda *args, **kw: None
-    known_headless_path_set = set()
-    for head_index, current_head in enumerate(args.head_list[:-1]):
-        head_list = args.head_list[head_index:]
-        for root, _, file_name_list in os.walk(current_head):
-            current_headless_root = os.path.relpath(root, current_head)
-            for file_name in file_name_list:
-                current_headless_file_path = os.path.join(current_headless_root, file_name)
-                if current_headless_file_path in known_headless_path_set:
-                    continue
-                inode_head_list_dict = {}
-                for head in head_list:
-                    full_path = os.path.join(head, current_headless_file_path)
-                    try:
-                        stat = os.lstat(full_path)
-                    except OSError:
+    if args.constant_memory:
+        known_headless_path_set = BlackHoleSet()
+    else:
+        known_headless_path_set = set()
+    gain = 0
+    try:
+        for head_index, current_head in enumerate(args.head_list[:-1]):
+            head_list = args.head_list[head_index:]
+            print(current_head)
+            found = False
+            for root, _, file_name_list in os.walk(current_head):
+                current_headless_root = os.path.relpath(root, current_head)
+                for file_name in file_name_list:
+                    current_headless_file_path = os.path.join(current_headless_root, file_name)
+                    if current_headless_file_path in known_headless_path_set:
                         continue
-                    key = stat.st_ino
-                    try:
-                        inode_head_list = inode_head_list_dict[key][1]
-                    except KeyError:
-                        inode_head_list_dict[key] = (
-                            FileCompare(full_path, stat),
-                            [head],
-                        )
-                    else:
-                        inode_head_list.append(head)
-                inode_head_list_list = inode_head_list_dict.values()
-                for inode_index, (my_file_compare, my_head_list) in enumerate(inode_head_list_list, 1):
-                    if not my_head_list:
-                        continue
-                    need_print = True
-                    my_path = my_file_compare.path
-                    for other_file_compare, other_head_list in inode_head_list_list[inode_index:]:
-                        if not other_head_list:
+                    known_headless_path_set.add(current_headless_file_path)
+                    inode_head_list_dict = {}
+                    for head in head_list:
+                        full_path = os.path.join(head, current_headless_file_path)
+                        try:
+                            stat = os.lstat(full_path)
+                        except OSError:
                             continue
-                        if my_file_compare == other_file_compare:
-                            if need_print:
-                                print ' ', my_path, '<-',
-                                need_print = False
-                            for other_head in other_head_list:
-                                print other_head,
-                                sys.stdout.flush()
-                                other_path = os.path.join(other_head, current_headless_file_path)
-                                try:
-                                    unlink(other_path)
-                                finally:
-                                    link(my_path, other_path)
-                            del other_head_list[:]
-                    if not need_print:
-                        print
-                known_headless_path_set.add(current_headless_file_path)
+                        key = stat.st_ino
+                        try:
+                            inode_head_list = inode_head_list_dict[key][1]
+                        except KeyError:
+                            inode_head_list_dict[key] = (
+                                FileCompare(full_path, stat),
+                                [head],
+                            )
+                        else:
+                            inode_head_list.append(head)
+                    inode_head_list_list = inode_head_list_dict.values()
+                    for inode_index, (my_file_compare, my_head_list) in enumerate(inode_head_list_list, 1):
+                        if not my_head_list:
+                            continue
+                        my_path = my_file_compare.path
+                        need_print = True
+                        for other_file_compare, other_head_list in inode_head_list_list[inode_index:]:
+                            if not other_head_list:
+                                continue
+                            if my_file_compare == other_file_compare:
+                                if need_print:
+                                    print(' ', my_path, '<-', end=' ')
+                                    need_print = False
+                                gain += other_file_compare.stat[0]
+                                found = True
+                                for other_head in other_head_list:
+                                    print(other_head, end=' ')
+                                    sys.stdout.flush()
+                                    other_path = os.path.join(other_head, current_headless_file_path)
+                                    try:
+                                        unlink(other_path)
+                                        link(my_path, other_path)
+                                    except:
+                                        print('Exception while (un)linking', repr(other_path), 'trying to finish before exiting')
+                                        if not os.path.lexist(other_path):
+                                            link(my_path, other_path)
+                                        raise
+                                del other_head_list[:]
+                        if not need_print:
+                            print()
+            if found:
+                print()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        print('Gain:', gain)
 
 if __name__ == '__main__':
     main()
