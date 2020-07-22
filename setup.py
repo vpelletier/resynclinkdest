@@ -15,12 +15,7 @@
 # along with resynclinkdest.  If not, see <http://www.gnu.org/licenses/>.
 from codecs import open
 import os.path
-import sys
 from setuptools import setup
-extra = {}
-if sys.version_info >= (3, ):
-    extra['use_2to3'] = True
-
 long_description = open(
     os.path.join(os.path.dirname(__file__), 'README.rst'),
     encoding='utf8',
@@ -54,5 +49,5 @@ setup(
         ],
     },
     zip_safe=True,
-    **extra
+    use_2to3=True,
 )

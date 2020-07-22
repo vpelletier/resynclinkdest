@@ -64,7 +64,7 @@ class FileCompare(object):
     def hash(self):
         hash_value = self._hash
         if hash_value is None:
-            with open(self.path) as my_file:
+            with open(self.path, 'rb') as my_file:
                 hash_list = (
                     hashlib.sha1(),
                     hashlib.md5(),
