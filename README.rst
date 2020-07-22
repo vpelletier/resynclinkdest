@@ -107,4 +107,4 @@ space regularly while running by unlinking all homonym duplicates at once.
 
 A disadvantage of this method compared to other hard-linkers is that it will not
 link together identical files if their name differs. But neither would
-``rsync --link-dest``, so it would not be our backup too of choice.
+``rsync --link-dest``, so it would not be our backup tool of choice.
